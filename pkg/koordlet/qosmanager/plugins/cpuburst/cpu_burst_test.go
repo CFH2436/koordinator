@@ -509,208 +509,200 @@ func Test_genPodBurstConfig(t *testing.T) {
 	}
 }
 
-func TestCPUBurst_applyContainerCPUBurst(t *testing.T) {
+func TestCPUBurst_applyCPUBurst(t *testing.T) {
+	type fields struct {
+		podName      string
+		containerRes map[string]corev1.ResourceRequirements
+	}
+	type args struct {
+		burstCfg slov1alpha1.CPUBurstConfig
+	}
+	type want struct {
+		containerBurstVal map[string]int64
+		podBurstVal       int64
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+		want   want
+	}{
+		{
+			name: "apply-by-default-burst-config",
+			fields: fields{
+				podName: "test-pod-1",
+				containerRes: map[string]corev1.ResourceRequirements{
+					"test-container-1": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
+						},
+					},
+					"test-container-2": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+					},
+				},
+			},
+			args: args{
+				burstCfg: defaultAutoBurstCfg,
+			},
+			want: want{
+				containerBurstVal: map[string]int64{
+					"test-container-1": 5 * 10 * system.CFSBasePeriodValue,
+					"test-container-2": 3 * 10 * system.CFSBasePeriodValue,
+				},
+				podBurstVal: (5 + 3) * 10 * system.CFSBasePeriodValue,
+			},
+		},
+		{
+			name: "apply-by-specified-burst-config",
+			fields: fields{
+				podName: "test-pod-1",
+				containerRes: map[string]corev1.ResourceRequirements{
+					"test-container-1": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
+						},
+					},
+					"test-container-2": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+					},
+				},
+			},
+			args: args{
+				burstCfg: slov1alpha1.CPUBurstConfig{
+					Policy:          slov1alpha1.CPUBurstAuto,
+					CPUBurstPercent: ptr.To[int64](500),
+				},
+			},
+			want: want{
+				containerBurstVal: map[string]int64{
+					"test-container-1": 5 * 5 * system.CFSBasePeriodValue,
+					"test-container-2": 3 * 5 * system.CFSBasePeriodValue,
+				},
+				podBurstVal: (5 + 3) * 5 * system.CFSBasePeriodValue,
+			},
+		},
+		{
+			name: "apply-by-disabled-burst-config",
+			fields: fields{
+				podName: "test-pod-1",
+				containerRes: map[string]corev1.ResourceRequirements{
+					"test-container-1": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
+						},
+					},
+					"test-container-2": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+					},
+				},
+			},
+			args: args{
+				burstCfg: slov1alpha1.CPUBurstConfig{
+					Policy:          slov1alpha1.CFSQuotaBurstOnly,
+					CPUBurstPercent: ptr.To[int64](500),
+				},
+			},
+			want: want{
+				containerBurstVal: map[string]int64{
+					"test-container-1": 0,
+					"test-container-2": 0,
+				},
+				podBurstVal: 0,
+			},
+		},
+		{
+			name: "apply-by-unlimited-container",
+			fields: fields{
+				podName: "test-pod-1",
+				containerRes: map[string]corev1.ResourceRequirements{
+					"test-container-1": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{},
+					},
+					"test-container-2": {
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						},
+						Limits: corev1.ResourceList{},
+					},
+				},
+			},
+			args: args{
+				burstCfg: defaultAutoBurstCfg,
+			},
+			want: want{
+				containerBurstVal: map[string]int64{
+					"test-container-1": 0,
+					"test-container-2": 0,
+				},
+				podBurstVal: 0,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testHelper := system.NewFileTestUtil(t)
 
+			b := &cpuBurst{
+				executor: newTestExecutor(),
+			}
+
+			stop := make(chan struct{})
+			b.init(stop)
+			defer func() { stop <- struct{}{} }()
+
+			podMeta := createPodMetaByResource(tt.fields.podName, tt.fields.containerRes)
+
+			initPodCPUBurst(podMeta, 0, testHelper)
+			initContainerCPUBurst(podMeta, 0, testHelper)
+
+			b.applyCPUBurst(&tt.args.burstCfg, podMeta)
+
+			for i := range podMeta.Pod.Status.ContainerStatuses {
+				containerStat := &podMeta.Pod.Status.ContainerStatuses[i]
+				want := tt.want.containerBurstVal[containerStat.Name]
+				got := getContainerCPUBurst(podMeta.CgroupDir, containerStat, testHelper)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("container %v applyCPUBurst() = %v, want = %v", containerStat.Name, got, want)
+				}
+			}
+
+			gotPod := getPodCPUBurst(podMeta.CgroupDir, testHelper)
+			if !reflect.DeepEqual(gotPod, tt.want.podBurstVal) {
+				t.Errorf("pod %v applyCPUBurst() = %v, want = %v", podMeta.Pod.Name, gotPod, tt.want.podBurstVal)
+			}
+		})
+	}
 }
 
-func TestCPUBurst_applyPodCPUBurst(t *testing.T) {
-
-}
-
-// func TestCPUBurst_applyCPUBurst(t *testing.T) {
-// 	type fields struct {
-// 		podName      string
-// 		containerRes map[string]corev1.ResourceRequirements
-// 	}
-// 	type args struct {
-// 		burstCfg slov1alpha1.CPUBurstConfig
-// 	}
-// 	type want struct {
-// 		containerBurstVal map[string]int64
-// 		podBurstVal       int64
-// 	}
-// 	tests := []struct {
-// 		name   string
-// 		fields fields
-// 		args   args
-// 		want   want
-// 	}{
-// 		{
-// 			name: "apply-by-default-burst-config",
-// 			fields: fields{
-// 				podName: "test-pod-1",
-// 				containerRes: map[string]corev1.ResourceRequirements{
-// 					"test-container-1": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
-// 						},
-// 					},
-// 					"test-container-2": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 					},
-// 				},
-// 			},
-// 			args: args{
-// 				burstCfg: defaultAutoBurstCfg,
-// 			},
-// 			want: want{
-// 				containerBurstVal: map[string]int64{
-// 					"test-container-1": 5 * 10 * system.CFSBasePeriodValue,
-// 					"test-container-2": 3 * 10 * system.CFSBasePeriodValue,
-// 				},
-// 				podBurstVal: (5 + 3) * 10 * system.CFSBasePeriodValue,
-// 			},
-// 		},
-// 		{
-// 			name: "apply-by-specified-burst-config",
-// 			fields: fields{
-// 				podName: "test-pod-1",
-// 				containerRes: map[string]corev1.ResourceRequirements{
-// 					"test-container-1": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
-// 						},
-// 					},
-// 					"test-container-2": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 					},
-// 				},
-// 			},
-// 			args: args{
-// 				burstCfg: slov1alpha1.CPUBurstConfig{
-// 					Policy:          slov1alpha1.CPUBurstAuto,
-// 					CPUBurstPercent: ptr.To[int64](500),
-// 				},
-// 			},
-// 			want: want{
-// 				containerBurstVal: map[string]int64{
-// 					"test-container-1": 5 * 5 * system.CFSBasePeriodValue,
-// 					"test-container-2": 3 * 5 * system.CFSBasePeriodValue,
-// 				},
-// 				podBurstVal: (5 + 3) * 5 * system.CFSBasePeriodValue,
-// 			},
-// 		},
-// 		{
-// 			name: "apply-by-disabled-burst-config",
-// 			fields: fields{
-// 				podName: "test-pod-1",
-// 				containerRes: map[string]corev1.ResourceRequirements{
-// 					"test-container-1": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(5000, resource.DecimalSI),
-// 						},
-// 					},
-// 					"test-container-2": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 					},
-// 				},
-// 			},
-// 			args: args{
-// 				burstCfg: slov1alpha1.CPUBurstConfig{
-// 					Policy:          slov1alpha1.CFSQuotaBurstOnly,
-// 					CPUBurstPercent: ptr.To[int64](500),
-// 				},
-// 			},
-// 			want: want{
-// 				containerBurstVal: map[string]int64{
-// 					"test-container-1": 0,
-// 					"test-container-2": 0,
-// 				},
-// 				podBurstVal: 0,
-// 			},
-// 		},
-// 		{
-// 			name: "apply-by-unlimited-container",
-// 			fields: fields{
-// 				podName: "test-pod-1",
-// 				containerRes: map[string]corev1.ResourceRequirements{
-// 					"test-container-1": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(3000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{},
-// 					},
-// 					"test-container-2": {
-// 						Requests: corev1.ResourceList{
-// 							corev1.ResourceCPU: *resource.NewMilliQuantity(2000, resource.DecimalSI),
-// 						},
-// 						Limits: corev1.ResourceList{},
-// 					},
-// 				},
-// 			},
-// 			args: args{
-// 				burstCfg: defaultAutoBurstCfg,
-// 			},
-// 			want: want{
-// 				containerBurstVal: map[string]int64{
-// 					"test-container-1": 0,
-// 					"test-container-2": 0,
-// 				},
-// 				podBurstVal: 0,
-// 			},
-// 		},
-// 	}
-// 	for _, tt := range tests {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			testHelper := system.NewFileTestUtil(t)
-
-// 			b := &cpuBurst{
-// 				executor: newTestExecutor(),
-// 			}
-
-// 			stop := make(chan struct{})
-// 			b.init(stop)
-// 			defer func() { stop <- struct{}{} }()
-
-// 			podMeta := createPodMetaByResource(tt.fields.podName, tt.fields.containerRes)
-
-// 			initPodCPUBurst(podMeta, 0, testHelper)
-// 			initContainerCPUBurst(podMeta, 0, testHelper)
-
-// 			b.applyCPUBurst(&tt.args.burstCfg, podMeta)
-
-// 			for i := range podMeta.Pod.Status.ContainerStatuses {
-// 				containerStat := &podMeta.Pod.Status.ContainerStatuses[i]
-// 				want := tt.want.containerBurstVal[containerStat.Name]
-// 				got := getContainerCPUBurst(podMeta.CgroupDir, containerStat, testHelper)
-// 				if !reflect.DeepEqual(got, want) {
-// 					t.Errorf("container %v applyCPUBurst() = %v, want = %v", containerStat.Name, got, want)
-// 				}
-// 			}
-
-// 			gotPod := getPodCPUBurst(podMeta.CgroupDir, testHelper)
-// 			if !reflect.DeepEqual(gotPod, tt.want.podBurstVal) {
-// 				t.Errorf("pod %v applyCPUBurst() = %v, want = %v", podMeta.Pod.Name, gotPod, tt.want.podBurstVal)
-// 			}
-// 		})
-// 	}
-// }
-
-func TestCPUBurst_applyCFSQuotaAndBurst(t *testing.T) {
+func TestCPUBurst_applyCFSQuotaBurst(t *testing.T) {
 	testPodName1 := "test-pod-1"
 	testContainerName1 := "test-container-1"
 	testContainerName2 := "test-container-2"
@@ -1290,7 +1282,7 @@ func TestCPUBurst_applyCFSQuotaAndBurst(t *testing.T) {
 				containerLimiter: make(map[string]*burstLimiter),
 			}
 			b.init(stop)
-			b.applyCFSQuotaAndBurst(&tt.args.burstCfg, podMeta, tt.args.nodeState)
+			b.applyCFSQuotaBurst(&tt.args.burstCfg, podMeta, tt.args.nodeState)
 
 			gotPod := getPodCFSQuota(podMeta, testHelper)
 			if !reflect.DeepEqual(gotPod, tt.want.podCFSQuotaVal) {
